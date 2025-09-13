@@ -13,12 +13,17 @@
     using SplitterCore.Emulation;
     using SplitterCore.Input;
     using SplitterCore.Preset;
-
     using VirtualXbox.Enums;
     using XinputWrapper.Enums;
 
     public class Splitter : SplitterBase
     {
+        // Cached fields for safe, high-speed access from the background input thread.
+        private bool isEmulationStarted;
+        private bool isBlockingKeyboards;
+        private bool isBlockingMice;
+        private readonly List<InputDevice> cachedAssignedDevices = new List<InputDevice>();
+
         public Splitter(int slotsCount)
             : base()
         {
@@ -103,7 +108,8 @@
                 }
 
 #if DEBUG
-                if (functionName != null)
+                // Conditional logging: Only write to the log if a function was triggered AND the monitor is active.
+                if (functionName != null && this.InputManager.IsInputMonitorActive)
                 {
                     bool suppress = (e.InputDevice.IsKeyboard && this.ShouldBlockKeyboards) || (!e.InputDevice.IsKeyboard && this.ShouldBlockMice);
                     LogWriter.Write(string.Format(
@@ -347,7 +353,7 @@
                     }
 
                     this.ShouldBlockKeyboards = false;
-
+                    this.isBlockingKeyboards = false; // Update cache
                     LogWriter.Write("Emergency activated: Block choosen keyboards unchecked");
                 }
                 else
@@ -358,7 +364,7 @@
                     }
 
                     this.ShouldBlockKeyboards = true;
-
+                    this.isBlockingKeyboards = true; // Update cache
                     LogWriter.Write("Emergency activated: Block choosen keyboards checked");
                 }
             });
@@ -376,7 +382,7 @@
                     }
 
                     this.ShouldBlockMice = false;
-
+                    this.isBlockingMice = false; // Update cache
                     LogWriter.Write("Emergency activated: Block choosen mice unchecked");
                 }
                 else
@@ -387,7 +393,7 @@
                     }
 
                     this.ShouldBlockMice = true;
-
+                    this.isBlockingMice = true; // Update cache
                     LogWriter.Write("Emergency activated: Block choosen mice checked");
                 }
             });
@@ -395,28 +401,40 @@
 
         private void InputManager_InputActivity(object sender, InputEventArgs e)
         {
-            if (!this.EmulationManager.IsEmulationStarted)
+            // PART 1: Fast, synchronous checks on the high-speed input thread using cached state.
+            if (!this.isEmulationStarted)
             {
                 return;
             }
 
-            if (this.AssignedInputDevices.Contains(e.InputDevice))
+            if (this.cachedAssignedDevices.Contains(e.InputDevice))
             {
-                e.Handled = e.InputDevice.IsKeyboard ? this.ShouldBlockKeyboards : this.ShouldBlockMice;
+                e.Handled = e.InputDevice.IsKeyboard ? this.isBlockingKeyboards : this.isBlockingMice;
             }
 
-            foreach (var slot in this.EmulationManager.Slots)
+            // PART 2: Slower logic that requires the UI thread is dispatched asynchronously.
+            this.Dispatcher.BeginInvoke((Action)delegate
             {
-                if (slot.Keyboard != e.InputDevice && slot.Mouse != e.InputDevice)
+                // Re-check emulation status on the UI thread in case it was stopped
+                // between the time this was dispatched and when it executes.
+                if (!this.EmulationManager.IsEmulationStarted)
                 {
-                    continue;
+                    return;
                 }
 
-                this.TranslateInput(e, slot, FunctionType.Button);
-                this.TranslateInput(e, slot, FunctionType.Trigger);
-                this.TranslateInput(e, slot, FunctionType.Axis);
-                this.TranslateInput(e, slot, FunctionType.Dpad);
-            }
+                foreach (var slot in this.EmulationManager.Slots)
+                {
+                    if (slot.Keyboard != e.InputDevice && slot.Mouse != e.InputDevice)
+                    {
+                        continue;
+                    }
+
+                    this.TranslateInput(e, slot, FunctionType.Button);
+                    this.TranslateInput(e, slot, FunctionType.Trigger);
+                    this.TranslateInput(e, slot, FunctionType.Axis);
+                    this.TranslateInput(e, slot, FunctionType.Dpad);
+                }
+            });
         }
 
         private void InputManager_InputDeviceChanged(object sender, InputDeviceChangedEventArgs e)
@@ -447,6 +465,10 @@
 
         private void EmulationManager_EmulationStarted(object sender, EventArgs e)
         {
+            // Populate the main device list and the thread-safe cache
+            this.AssignedInputDevices.Clear();
+            this.cachedAssignedDevices.Clear();
+
             foreach (var slot in this.EmulationManager.Slots)
             {
                 if (slot.Keyboard != null && !this.AssignedInputDevices.Contains(slot.Keyboard))
@@ -459,11 +481,21 @@
                     this.AssignedInputDevices.Add(slot.Mouse);
                 }
             }
+
+            this.cachedAssignedDevices.AddRange(this.AssignedInputDevices);
+            this.isBlockingKeyboards = this.ShouldBlockKeyboards;
+            this.isBlockingMice = this.ShouldBlockMice;
+            this.isEmulationStarted = true;
         }
 
         private void EmulationManager_EmulationStopped(object sender, EventArgs e)
         {
+            // Clear the main device list and the thread-safe cache
             this.AssignedInputDevices.Clear();
+            this.cachedAssignedDevices.Clear();
+            this.isBlockingKeyboards = false;
+            this.isBlockingMice = false;
+            this.isEmulationStarted = false;
         }
     }
 }

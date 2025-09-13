@@ -2,6 +2,7 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Collections.ObjectModel;
     using System.Linq;
     using System.Text;
     using System.Windows;
@@ -30,12 +31,23 @@
             typeof(InputManager),
             new PropertyMetadata(null));
 
+        // DELETE the entire InputMonitorHistory DependencyProperty
+        /*
         public static readonly DependencyProperty InputMonitorHistoryProperty =
             DependencyProperty.Register(
             "InputMonitorHistory",
             typeof(string),
             typeof(InputManager),
             new PropertyMetadata(string.Empty));
+        */
+
+        // ... (Other DependencyProperties remain the same)
+
+        // ADD these three new lines:
+        private const int MaxLogLines = 200; // Capping the log at 200 lines to prevent memory issues.
+        public ObservableCollection<string> InputMonitorLog { get; } = new ObservableCollection<string>();
+        public bool IsInputMonitorActive { get; set; } = false; // Controls if we should log at all.
+
 
         private Interception interceptor;
 
@@ -105,18 +117,24 @@
             set { this.SetValue(MiceProperty, value); }
         }
 
+        // DELETE the InputMonitorHistory property
+        /*
         public string InputMonitorHistory
         {
             get { return (string)this.GetValue(InputMonitorHistoryProperty); }
             set { this.SetValue(InputMonitorHistoryProperty, value); }
         }
+        */
 
         protected bool IsDestroyed { get; set; }
 
+        // DELETE the ClearInputMonitorHistory method
+        /*
         public void ClearInputMonitorHistory()
         {
             this.InputMonitorHistory = string.Empty;
         }
+        */
 
         public bool IsKeyDown(InputDevice inputDevice, InputKey key)
         {
@@ -241,43 +259,45 @@
 
         private void OnInterceptionInputActivity(object sender, InterceptionEventArgs e)
         {
-            var action = new Action(() =>
+            // The core logic of processing inputs will now run directly on this high-priority
+            // thread from the Interceptor library. This prevents blocking the UI thread.
+            foreach (var keyInfo in e.KeyInfos)
             {
-                foreach (var keyInfo in e.KeyInfos)
+                var device = InputHelper.ToInputDevice(e.Device);
+                var key = InputHelper.ToInputKey(keyInfo.Key);
+                var args = new InputEventArgs(device, key, keyInfo.IsDown, e.Handled);
+
+                // Fire the event that the Splitter class listens to. This is fast because
+                // it's just in-memory object manipulation, not UI work.
+                if (this.InputActivity != null)
                 {
-                    var device = InputHelper.ToInputDevice(e.Device);
-                    var key = InputHelper.ToInputKey(keyInfo.Key);
-                    var args = new InputEventArgs(device, key, keyInfo.IsDown, e.Handled);
-
-                    if (this.InputActivity != null)
-                    {
-                        this.InputActivity(this, args);
-                        e.Handled = args.Handled;
-                    }
-
-                    if (!KeysHelper.IsMouseMoveKey(keyInfo.Key))
-                    {
-                        var sb = new StringBuilder(this.InputMonitorHistory);
-                        sb.AppendLine(args.ToString());
-                        this.InputMonitorHistory = sb.ToString();
-                    }
+                    this.InputActivity(this, args);
+                    e.Handled = args.Handled;
                 }
 
-                this.CheckForEmergencyHit(e);
-            });
+                // --- UI LOGIC ---
+                // Now, we check if we need to update the UI (the input monitor).
+                // This is the ONLY part that gets sent to the UI thread.
+                // We use BeginInvoke, which is "fire-and-forget" so we don't wait for it.
+                if (this.IsInputMonitorActive && !KeysHelper.IsMouseMoveKey(keyInfo.Key))
+                {
+                    this.Dispatcher.BeginInvoke((Action)delegate
+                    {
+                        this.InputMonitorLog.Add(args.ToString());
 
-            bool isMouseClick = e.Device.DeviceType == InterceptionDeviceType.Mouse && e.KeyInfos.Any(x => KeysHelper.IsMouseClickKey(x.Key));
-            
-            // App.IsFocused is maybe too slow and the ui freezes the splitter main window
-            if (isMouseClick && GlobalSettings.IsMainWindowActivated)
-            {
-                this.Dispatcher.BeginInvoke(action);
-            }
-            else
-            {
-                this.Dispatcher.Invoke(action);
+                        if (this.InputMonitorLog.Count > MaxLogLines)
+                        {
+                            this.InputMonitorLog.RemoveAt(0);
+                        }
+                    });
+                }
             }
 
+            // The emergency key check can also run directly on this thread.
+            this.CheckForEmergencyHit(e);
+
+            // This logic to prevent the main window from handling the input
+            // can remain as it has a negligible performance impact.
             if (GlobalSettings.IsMainWindowActivated)
             {
                 e.Handled = false;

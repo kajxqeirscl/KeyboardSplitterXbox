@@ -191,7 +191,6 @@
             try
             {
                 this.Splitter.EmulationManager.Start();
-                this.Splitter.InputManager.ClearInputMonitorHistory();
             }
             catch (KeyboardSplitterExceptionBase ex)
             {
@@ -417,12 +416,22 @@
         private void Expander_Expanded(object sender, RoutedEventArgs e)
         {
             this.autoCollapseTimer.Start();
+            if (this.Splitter?.InputManager != null)
+            {
+                this.Splitter.InputManager.IsInputMonitorActive = true;
+            }
         }
 
         private void Expander_Collapsed(object sender, RoutedEventArgs e)
         {
             this.autoCollapseTimer.Stop();
-            this.Splitter.InputManager.ClearInputMonitorHistory();
+            if (this.Splitter?.InputManager != null)
+            {
+                this.Splitter.InputManager.IsInputMonitorActive = false;
+
+                // Optional: Uncomment the line below if you want the log to clear every time you close it.
+                // this.Splitter.InputManager.InputMonitorLog.Clear();
+            }
         }
 
         private void FileExit_Click(object sender, RoutedEventArgs e)
